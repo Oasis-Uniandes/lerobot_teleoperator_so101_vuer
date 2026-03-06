@@ -10,7 +10,7 @@ This plugin requires a working installation of LeRobot and the Pyroki IK solver.
 
 **1. Clone the repository**
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/SinfonIAUniandes/lerobot_teleoperator_so101_vuer
 cd lerobot_teleoperator_so101_vuer
 
 ```
