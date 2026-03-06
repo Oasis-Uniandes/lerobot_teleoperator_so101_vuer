@@ -1,8 +1,8 @@
 # SO101 Vuer VR Teleoperator
 
-A custom teleoperation plugin for the [LeRobot](https://github.com/huggingface/lerobot) framework. This package spins up a local [Vuer](https://docs.vuer.ai/) server to stream real-time 6-DoF hand tracking and pinch gestures directly from a VR headset into your robotics pipeline.
+This project is a collaboration between [SinfonIA Uniandes](https://github.com/SinfonIAUniandes) and [Oasis Uniandes](https://github.com/Oasis-Uniandes) to create a custom teleoperation plugin for the [LeRobot](https://github.com/huggingface/lerobot) framework. This package spins up a local [Vuer](https://docs.vuer.ai/) server to stream real-time 6-DoF hand tracking and pinch gestures directly from a VR headset into your robotics pipeline.
 
-It uses [Pyroki](https://github.com/chungmin99/pyroki) to solve Inverse Kinematics (IK) on the fly, translating your physical hand movements into joint angles for the robot arm. **It has been explicitly tested using the Meta Quest 3** via the native WebXR browser API.
+It uses [Pyroki](https://github.com/chungmin99/pyroki) to solve Inverse Kinematics (IK) on the fly, translating your physical hand movements into joint angles for the robot arm. The inverse kinematics codebase for this implementation was derived from [lerobot_teleoperator_so101_ik](https://github.com/SinfonIAUniandes/lerobot_teleoperator_so101_ik). **It has been explicitly tested using the Meta Quest 3** via the native WebXR browser API.
 
 ## Installation
 
@@ -10,7 +10,7 @@ This plugin requires a working installation of LeRobot and the Pyroki IK solver.
 
 **1. Clone the repository**
 ```bash
-git clone https://github.com/SinfonIAUniandes/lerobot_teleoperator_so101_vuer
+git clone https://github.com/Oasis-Uniandes/lerobot_teleoperator_so101_vuer
 cd lerobot_teleoperator_so101_vuer
 
 ```
@@ -44,9 +44,40 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pe
 
 ## Usage
 
-Once installed, the teleoperator is automatically discovered by the LeRobot CLI and can be referenced using `--teleop.type=so101_vuer`.
+Once installed, the teleoperator is automatically discovered by the LeRobot CLI and can be referenced using `--teleop.type=so101_vuer`. You can use it to control either a physical SO-101 arm or a simulated digital twin.
 
-### 1. Handling Certificates and Running the Server
+### 1. Teleoperating the Physical SO-101 Arm
+
+To use the real LeRobot SO-101 follower arm, you must first identify the correct USB ports and grant them read/write permissions.
+
+Find your connected serial ports:
+
+```bash
+lerobot-find-port
+
+```
+
+Once you identify the ports (e.g., `/dev/ttyACM0` and `/dev/ttyACM1`), grant them access:
+
+```bash
+sudo chmod 666 /dev/ttyACM0
+sudo chmod 666 /dev/ttyACM1
+
+```
+
+Run the teleoperation command targeting the physical follower:
+
+```bash
+lerobot-teleoperate \
+  --robot.type=so101_follower \
+  --robot.port=/dev/ttyACM0 \
+  --teleop.type=so101_vuer
+
+```
+
+### 2. Teleoperating the MuJoCo Simulation
+
+You can also teleoperate a simulated version of the robot. The MuJoCo simulation package used in these examples can be found at [lerobot_robot_so101_mujoco](https://github.com/SinfonIAUniandes/lerobot_robot_so101_mujoco).
 
 **Case A: Running from the same directory as your certificates**
 If your terminal is in the same folder where `cert.pem` and `key.pem` are located, you can run the command normally. The plugin defaults to looking in the current working directory (`./cert.pem` and `./key.pem`).
@@ -72,18 +103,18 @@ lerobot-teleoperate \
 
 *(Note: You can also configure the tracked hand, coordinate system, and user height via CLI overrides like `--teleop.user_hand=left` or `--teleop.user_height=1.75`).*
 
-### 2. Connecting the Meta Quest 3
+### 3. Connecting the Meta Quest 3
 
 Once the LeRobot command is running and the Vuer server has started:
 
 1. Ensure your PC and your Meta Quest 3 are connected to the **exact same Wi-Fi network**.
 2. Find your PC's local IP address (e.g., `192.168.1.50`).
 3. Put on the Quest 3, open the **Meta Quest Browser**, and navigate to the following URL (replacing `<YOUR_IP>` with your actual IP address):
+
 ```text
 https://<YOUR_IP>:8012/?ws=wss://<YOUR_IP>:8012
 
 ```
-
 
 *(You must explicitly type both `https://` and the `?ws=wss://` parameters).*
 4. The browser will warn you that the connection is not private. Click **Advanced** and proceed anyway.
