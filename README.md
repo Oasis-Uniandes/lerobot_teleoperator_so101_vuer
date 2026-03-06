@@ -1,5 +1,9 @@
 # SO101 Vuer VR Teleoperator
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/2a032f86-1df0-4225-8dcf-8f11cb1bfc00" width="600">
+</p>
+
 This project is a collaboration between [SinfonIA Uniandes](https://github.com/SinfonIAUniandes) and [Oasis Uniandes](https://github.com/Oasis-Uniandes) to create a custom teleoperation plugin for the [LeRobot](https://github.com/huggingface/lerobot) framework. This package spins up a local [Vuer](https://docs.vuer.ai/) server to stream real-time 6-DoF hand tracking and pinch gestures directly from a VR headset into your robotics pipeline.
 
 It uses [Pyroki](https://github.com/chungmin99/pyroki) to solve Inverse Kinematics (IK) on the fly, translating your physical hand movements into joint angles for the robot arm. The inverse kinematics codebase for this implementation was derived from [lerobot_teleoperator_so101_ik](https://github.com/SinfonIAUniandes/lerobot_teleoperator_so101_ik). **It has been explicitly tested using the Meta Quest 3** via the native WebXR browser API.
