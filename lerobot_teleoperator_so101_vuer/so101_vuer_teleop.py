@@ -9,7 +9,9 @@ from lerobot.teleoperators.teleoperator import Teleoperator
 from .config_so101_vuer_teleop import So101VuerTeleopConfig
 
 from vuer import Vuer, VuerSession
-from vuer.schemas import Hands
+from vuer.schemas import Hands, MotionControllers, Image
+import cv2
+import base64
 import pyroki as pk
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from .pyroki_snippets import solve_ik
@@ -34,6 +36,7 @@ class So101VuerTeleop(Teleoperator):
         self._target_gripper = 0.0
         
         self._latest_q_sol = None
+        self._latest_frame_b64 = None
 
         self.scale = 50.0  
         self.ik_joint_mapping = {
@@ -95,6 +98,14 @@ class So101VuerTeleop(Teleoperator):
         
         # Final Hand relative to Robot Base
         T_hand_robot = T_vr_to_robot @ T_hand_torso
+        
+        # Apply a local rotation offset to align the hand's grip with the robot gripper
+        # Adjusting roll/pitch/yaw locally so the thumbs align
+        hand_offset = R.from_euler('z', -np.pi / 2).as_matrix() # 90 degree correction around Z (local forward in VR)
+        T_offset = np.eye(4)
+        T_offset[:3, :3] = hand_offset
+        T_hand_robot = T_hand_robot @ T_offset
+        
         return T_hand_robot
 
     def _vuer_worker(self):
@@ -128,13 +139,77 @@ class So101VuerTeleop(Teleoperator):
             
             with self._lock:
                 self._target_pos = pos
-                self._target_wxyz = quat_wxyz
+                
+                # Block rotation updates if pinch is below threshold to allow for more stable gripper control at close range
+                if pinch_val < 0.2:
+                    self._target_wxyz = quat_wxyz
+                    
+                self._target_gripper = 1.0 - float(pinch_val)
+
+        @app.add_handler("CONTROLLER_MOVE")
+        async def on_controller_move(event, session):
+            controller_data = event.value.get(self.config.user_hand)
+            if not controller_data or len(controller_data) < 16:
+                return
+                
+            wrist_flat_array = controller_data[:16]
+            hand_matrix_vr = np.array(wrist_flat_array).reshape(4, 4).T
+            
+            # Extract trigger value for the gripper
+            state = event.value.get(f"{self.config.user_hand}State", {})
+            pinch_val = state.get("triggerValue", state.get("squeezeValue", 0.0))
+            
+            # Transform matrix
+            T_robot = self.compute_robot_target_matrix(hand_matrix_vr)
+            
+            # Note: Controllers typically have a different base rotation from hand tracking
+            # We add an offset to align the controller with the robot's end effector similarly to hands.
+            # This specific rotation aligns Meta Quest 3 controllers correctly.
+            R_controller_offset = np.array([
+                [ 1,  0,  0],
+                [ 0,  0,  1],
+                [ 0, -1,  0]
+            ])
+            
+            T_offset = np.eye(4)
+            T_offset[:3, :3] = R_controller_offset
+            T_robot = T_robot @ T_offset
+            
+            pos = T_robot[:3, 3]
+            
+            quat_xyzw = R.from_matrix(T_robot[:3, :3]).as_quat()
+            quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
+            
+            with self._lock:
+                self._target_pos = pos
+                
+                if pinch_val < 0.2:
+                    self._target_wxyz = quat_wxyz
+                    
                 self._target_gripper = 1.0 - float(pinch_val)
 
         @app.spawn(start=True)
         async def main(session: VuerSession):
             session.upsert(Hands(stream=True, key="hands", showLeft=True, showRight=True), to="bgChildren")
+            session.upsert(MotionControllers(stream=True, key="motionControllers", left=True, right=True), to="bgChildren")
+            last_sent_b64 = None
             while self._is_connected:
+                with self._lock:
+                    current_b64 = self._latest_frame_b64
+                    
+                if current_b64 is not None and current_b64 != last_sent_b64:
+                    session.upsert(
+                        Image(
+                            src=f"data:image/jpeg;base64,{current_b64}",
+                            position=[0, self.config.user_height - 0.1, -0.6],
+                            rotation=[0, 0, 0],
+                            scale=[0.8, 0.6, 1.0],
+                            key="camera_feed"
+                        ),
+                        to="bgChildren"
+                    )
+                    last_sent_b64 = current_b64
+                    
                 await asyncio.sleep(0.01)
 
         print("VR Server Started. Waiting for headset connection...")
@@ -160,6 +235,46 @@ class So101VuerTeleop(Teleoperator):
 
             time.sleep(0.01)
 
+    def _camera_worker(self):
+        """Autonomously searches for the active robot in memory to copy its camera feed, bypassing LeRobot's closed CLI loop."""
+        import gc
+        from lerobot.robots.robot import Robot as BaseRobot
+        active_robot = None
+        
+        while self._is_connected:
+            try:
+                if active_robot is None:
+                    # Dynamically find the active robot initialized by the CLI
+                    for obj in gc.get_objects():
+                        if isinstance(obj, BaseRobot) and getattr(obj, "is_connected", False):
+                            active_robot = obj
+                            break
+                
+                if active_robot is not None and hasattr(active_robot, "get_observation"):
+                    obs = active_robot.get_observation()
+                    selected_img = None
+                    # Find any camera matrix from MuJoCo or Realsense
+                    for key, val in obs.items():
+                        if isinstance(val, np.ndarray) and val.ndim == 3:
+                            selected_img = val
+                            break
+                            
+                    if selected_img is not None:
+                        if selected_img.shape[0] in [1, 3]:
+                            selected_img = np.transpose(selected_img, (1, 2, 0))
+                        if selected_img.dtype != np.uint8:
+                            selected_img = (np.clip(selected_img, 0, 1) * 255).astype(np.uint8)
+
+                        # BGR conversion for cv2 compression
+                        bgr_img = cv2.cvtColor(selected_img, cv2.COLOR_RGB2BGR)
+                        success, encoded = cv2.imencode('.jpg', bgr_img, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                        if success:
+                            with self._lock:
+                                self._latest_frame_b64 = base64.b64encode(encoded).decode('utf-8')
+            except Exception:
+                pass
+            time.sleep(0.033) # ~30 FPS polling
+
     def connect(self) -> None:
         self.urdf = load_robot_description(self.config.urdf_name)
         self.robot = pk.Robot.from_urdf(self.urdf)
@@ -178,9 +293,11 @@ class So101VuerTeleop(Teleoperator):
 
         self._ik_thread = threading.Thread(target=self._ik_worker, daemon=True)
         self._vuer_thread = threading.Thread(target=self._vuer_worker, daemon=True)
+        self._cam_thread = threading.Thread(target=self._camera_worker, daemon=True)
         
         self._ik_thread.start()
         self._vuer_thread.start()
+        self._cam_thread.start()
 
     def disconnect(self) -> None:
         self._is_connected = False
@@ -226,4 +343,5 @@ class So101VuerTeleop(Teleoperator):
     def is_calibrated(self) -> bool: return True
     def calibrate(self) -> None: pass
     def configure(self) -> None: pass
+    
     def send_feedback(self, feedback: dict[str, Any]) -> None: pass
