@@ -9,7 +9,7 @@ from lerobot.teleoperators.teleoperator import Teleoperator
 from .config_so101_vuer_teleop import So101VuerTeleopConfig
 
 from vuer import Vuer, VuerSession
-from vuer.schemas import Hands, MotionControllers, Image
+from vuer.schemas import Hands, MotionControllers, ImageBackground, Scene
 import cv2
 import base64
 import pyroki as pk
@@ -190,27 +190,33 @@ class So101VuerTeleop(Teleoperator):
 
         @app.spawn(start=True)
         async def main(session: VuerSession):
+            session.set(Scene())
             session.upsert(Hands(stream=True, key="hands", showLeft=True, showRight=True), to="bgChildren")
             session.upsert(MotionControllers(stream=True, key="motionControllers", left=True, right=True), to="bgChildren")
             last_sent_b64 = None
             while self._is_connected:
                 with self._lock:
-                    current_b64 = self._latest_frame_b64
+                    current_img = self._latest_frame
                     
-                if current_b64 is not None and current_b64 != last_sent_b64:
+                if current_img is not None:
                     session.upsert(
-                        Image(
-                            src=f"data:image/jpeg;base64,{current_b64}",
-                            position=[0, self.config.user_height - 0.1, -0.6],
-                            rotation=[0, 0, 0],
-                            scale=[0.8, 0.6, 1.0],
-                            key="camera_feed"
+                        ImageBackground(
+                            current_img,
+                            format="jpeg",
+                            quality=50,
+                            fixed=True,             
+                            # Pushes the screen further away from your face (80cm)
+                            distanceToCamera=1,   
+                            key="camera_feed",
+                            # X=0 (centered)
+                            # Y= drops the screen 60cm below your eye level
+                            # Z=0 (depth is handled by distanceToCamera)
+                            position=[0, self.config.user_height - 0.6, -3],
                         ),
                         to="bgChildren"
                     )
-                    last_sent_b64 = current_b64
                     
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.033)
 
         print("VR Server Started. Waiting for headset connection...")
         app.run()
@@ -260,17 +266,16 @@ class So101VuerTeleop(Teleoperator):
                             break
                             
                     if selected_img is not None:
-                        if selected_img.shape[0] in [1, 3]:
-                            selected_img = np.transpose(selected_img, (1, 2, 0))
+                        # Convert to uint8 if necessary
                         if selected_img.dtype != np.uint8:
                             selected_img = (np.clip(selected_img, 0, 1) * 255).astype(np.uint8)
 
-                        # BGR conversion for cv2 compression
-                        bgr_img = cv2.cvtColor(selected_img, cv2.COLOR_RGB2BGR)
-                        success, encoded = cv2.imencode('.jpg', bgr_img, [cv2.IMWRITE_JPEG_QUALITY, 50])
-                        if success:
-                            with self._lock:
-                                self._latest_frame_b64 = base64.b64encode(encoded).decode('utf-8')
+                        # Deep copy and resize to save bandwidth (fixes the SegFault and Network Choking)
+                        selected_img = cv2.resize(selected_img.copy(), (320, 240))
+                        
+                        with self._lock:
+                            # Pass the raw numpy array directly! No Base64 or OpenCV conversion needed.
+                            self._latest_frame = selected_img
             except Exception:
                 pass
             time.sleep(0.033) # ~30 FPS polling
