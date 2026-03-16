@@ -9,7 +9,7 @@ from lerobot.teleoperators.teleoperator import Teleoperator
 from .config_so101_vuer_teleop import So101VuerTeleopConfig
 
 from vuer import Vuer, VuerSession
-from vuer.schemas import Hands, MotionControllers, ImageBackground, Scene
+from vuer.schemas import Hands, MotionControllers, ImageBackground, Scene, CoordsMarker
 import cv2
 import base64
 import pyroki as pk
@@ -34,6 +34,11 @@ class So101VuerTeleop(Teleoperator):
         self._target_pos = np.array([0.00931305, -0.27034248, 0.26730747])
         self._target_wxyz = np.array([0.707, -0.707, 0.0, 0.0])
         self._target_gripper = 0.0
+        
+        # --- NEW: Visualizer State ---
+        self._viz_pos = np.array([0.0, 0.0, 0.0])
+        self._viz_rot = np.array([0.0, 0.0, 0.0])
+        # -----------------------------
         
         self._latest_q_sol = None
         self._latest_frame_b64 = None
@@ -123,6 +128,12 @@ class So101VuerTeleop(Teleoperator):
                 
             wrist_flat_array = hand_data[:16]
             hand_matrix_vr = np.array(wrist_flat_array).reshape(4, 4).T
+
+            # --- THE GIZMO MATH (VR Space) ---
+            # Completely raw, unperturbed hand coordinates directly from the headset
+            viz_pos = hand_matrix_vr[:3, 3]
+            viz_euler = R.from_matrix(hand_matrix_vr[:3, :3]).as_euler('xyz')
+            # ---------------------------------
             
             # Extract pinch strength for the gripper
             hand_state = event.value.get(f"{self.config.user_hand}State", {})
@@ -140,6 +151,11 @@ class So101VuerTeleop(Teleoperator):
             with self._lock:
                 self._target_pos = pos
                 
+                # --- NEW: Save visualizer state ---
+                self._viz_pos = viz_pos
+                self._viz_rot = viz_euler
+                # ----------------------------------
+                
                 # Block rotation updates if pinch is below threshold to allow for more stable gripper control at close range
                 if pinch_val < 0.2:
                     self._target_wxyz = quat_wxyz
@@ -154,26 +170,21 @@ class So101VuerTeleop(Teleoperator):
                 
             wrist_flat_array = controller_data[:16]
             hand_matrix_vr = np.array(wrist_flat_array).reshape(4, 4).T
+
+            # --- THE GIZMO MATH (VR Space) ---
+            # Completely raw, unperturbed controller coordinates
+            viz_pos = hand_matrix_vr[:3, 3]
+            viz_euler = R.from_matrix(hand_matrix_vr[:3, :3]).as_euler('xyz')
+            # ---------------------------------
             
             # Extract trigger value for the gripper
             state = event.value.get(f"{self.config.user_hand}State", {})
             pinch_val = state.get("triggerValue", state.get("squeezeValue", 0.0))
             
-            # Transform matrix
+            # Transform matrix (Note: compute_robot_target_matrix still has one Z-axis hand_offset inside it)
             T_robot = self.compute_robot_target_matrix(hand_matrix_vr)
             
-            # Note: Controllers typically have a different base rotation from hand tracking
-            # We add an offset to align the controller with the robot's end effector similarly to hands.
-            # This specific rotation aligns Meta Quest 3 controllers correctly.
-            R_controller_offset = np.array([
-                [ 1,  0,  0],
-                [ 0,  0,  1],
-                [ 0, -1,  0]
-            ])
-            
-            T_offset = np.eye(4)
-            T_offset[:3, :3] = R_controller_offset
-            T_robot = T_robot @ T_offset
+            # ALL extra controller rotation perturbations have been removed from here!
             
             pos = T_robot[:3, 3]
             
@@ -182,6 +193,11 @@ class So101VuerTeleop(Teleoperator):
             
             with self._lock:
                 self._target_pos = pos
+                
+                # --- NEW: Save visualizer state ---
+                self._viz_pos = viz_pos
+                self._viz_rot = viz_euler
+                # ----------------------------------
                 
                 if pinch_val < 0.2:
                     self._target_wxyz = quat_wxyz
@@ -197,7 +213,21 @@ class So101VuerTeleop(Teleoperator):
             while self._is_connected:
                 with self._lock:
                     current_img = self._latest_frame
+                    # Safely copy the gizmo state
+                    viz_pos = self._viz_pos.copy()
+                    viz_rot = self._viz_rot.copy()
                     
+                # --- NEW: Render the Vector Gizmo ---
+                session.upsert(
+                    CoordsMarker(
+                        position=viz_pos.tolist(),
+                        rotation=viz_rot.tolist(),
+                        scale=0.15, # Sets the vectors to be 15cm long
+                        key="ik_gizmo"
+                    ),
+                    to="bgChildren"
+                )
+                
                 if current_img is not None:
                     session.upsert(
                         ImageBackground(
